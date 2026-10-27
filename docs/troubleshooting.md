@@ -28,7 +28,7 @@ Name them correctly in that meeting: their voice is learned from it. If a voice 
 
 ## Words that nobody said
 
-Whisper sometimes writes "Thank you." or "Gracias." for near-silence; Mel filters the usual ones ([why](transcription.md#text-that-nobody-said)). If others slip through, add them to `GHOSTS` in `server/app.py`.
+Whisper sometimes writes "Thank you." or "Gracias." for near-silence; Mel filters the usual ones ([why](03-transcription.md#text-that-nobody-said)). If others slip through, add them to `GHOSTS` in `server/app.py`.
 
 ## The server doesn't start
 
@@ -37,3 +37,7 @@ Whisper sometimes writes "Thank you." or "Gracias." for near-silence; Mel filter
 ## Something else
 
 `setup.log` has the output of the last setup, `server/server.log` the server's. Please include both when you open an issue, but never your database or recordings: they hold your conversations.
+
+---
+
+[← Contents](README.md)

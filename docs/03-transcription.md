@@ -1,4 +1,4 @@
-# Transcription
+# 3. Transcription
 
 The server (`server/app.py`) runs **Whisper large-v3-turbo** with [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), Apple's MLX port, on the GPU. An utterance of a few seconds takes about one second.
 
@@ -54,3 +54,7 @@ MLX binds its GPU streams to the thread that created them, so every MLX call (Wh
 | `whisper-small-mlx` | 0.5 GB | Fastest, for older Macs or when transcription falls behind. |
 
 Pick one in the app's **Settings › Models**, or see [Configuration](configuration.md).
+
+---
+
+[← 2. Recording](02-recording.md) · [4. After the meeting →](04-after-the-meeting.md)

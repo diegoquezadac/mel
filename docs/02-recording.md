@@ -1,4 +1,4 @@
-# Recording
+# 2. Recording
 
 ## Capturing both sides of a call
 
@@ -50,6 +50,6 @@ Each utterance goes to a background queue that posts it to the server. The audio
 
 The recording language can change while recording. The app writes `language es` (or `auto`) to the client's stdin, and every utterance from then on uses it. You can type the same thing in a terminal recording.
 
-## Next
+---
 
-[Transcription](transcription.md) explains what the server does with each utterance; [After the meeting](after-the-meeting.md) covers what happens when you press Stop.
+[← 1. Overview](01-overview.md) · [3. Transcription →](03-transcription.md)

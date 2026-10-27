@@ -1,4 +1,4 @@
-# Data
+# 6. Data
 
 Everything Mel knows lives in one SQLite database, `mel.db`: meetings, transcripts, speakers, the people you've named and your settings. Audio stays in WAV files next to it, one folder per meeting.
 
@@ -67,7 +67,7 @@ erDiagram
 | `settings` | Languages, models, recording language, microphone, floating transcript. |
 | `segments_search` | A full-text index over `segments.text`, kept up to date by triggers. It ignores accents: "reunion" finds "reunión". |
 
-**A speaker's name is `COALESCE(people.name, speakers.label)`.** Naming a speaker links them to a person instead of rewriting text, so renaming a person updates every meeting they're in. See [Voices](voices.md).
+**A speaker's name is `COALESCE(people.name, speakers.label)`.** Naming a speaker links them to a person instead of rewriting text, so renaming a person updates every meeting they're in. See [Voices](05-voices.md).
 
 The schema lives in `db/001_initial.sql`, with comments on every column.
 
@@ -137,3 +137,7 @@ Before the database, meetings were folders in the repository's `recordings/` wit
 
 - the audio is moved into `Recordings/`
 - the old text files are backed up to `backup-<date>.tar.gz`, then left in `recordings.imported/`
+
+---
+
+[← 5. Voices](05-voices.md) · [7. The app →](07-app.md)

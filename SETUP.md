@@ -119,6 +119,6 @@ Suggest headphones for real meetings, so the call isn't also picked up by the mi
 | Health never gets ready | Model still downloading or failed to load | `./mel logs` |
 | Port 8765 in use | Another program | `lsof -i :8765` |
 | Transcript lags behind | Mac too slow for the model | Settings › Models › Whisper Small |
-| Text nobody said ("Thank you.") | Whisper inventing text in silence | Mostly filtered; see `docs/transcription.md` |
+| Text nobody said ("Thank you.") | Whisper inventing text in silence | Mostly filtered; see `docs/03-transcription.md` |
 
 Logs: `setup.log` (wizard), `server/server.log` (server, also `./mel logs`). How everything works: `docs/README.md`.

@@ -55,3 +55,7 @@ tccutil reset All local.mel
 ```
 
 Then delete the repository folder (models) and `~/Library/Application Support/Mel` (your meetings).
+
+---
+
+[← Contents](README.md)

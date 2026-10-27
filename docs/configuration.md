@@ -2,7 +2,7 @@
 
 ## Languages and models
 
-Settings are rows of the `settings` table in `mel.db` ([data](data.md)). Setup writes the languages, the app's **Settings** everything else, and `./mel` passes the server's ones as environment variables every time it starts it. Environment variables you set yourself win.
+Settings are rows of the `settings` table in `mel.db` ([data](06-data.md)). Setup writes the languages, the app's **Settings** everything else, and `./mel` passes the server's ones as environment variables every time it starts it. Environment variables you set yourself win.
 
 | Setting | Default | |
 | --- | --- | --- |
@@ -47,3 +47,7 @@ While `./mel start` runs, type `language es` (or `auto`) and Enter to change the
 | `POST /title` | `{"transcript": "Speaker: text\n…"}` | `{"title"}` |
 
 `./mel download [--speakers]` fetches the configured models without starting the server (setup uses it).
+
+---
+
+[← Contents](README.md)

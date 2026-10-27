@@ -1,4 +1,4 @@
-# After the meeting
+# 4. After the meeting
 
 Pressing Stop (or Ctrl+C) doesn't end the work: the last utterances are still being transcribed, the other people haven't been told apart, and the meeting has no name. The client finishes all of it before exiting.
 
@@ -26,7 +26,7 @@ During the meeting, everyone on the call is "Them": they all come through the sa
 - **Turns**: who spoke when. Mel uses the *exclusive* version, without overlapping speech, which lines up better with transcript segments.
 - **A voiceprint per speaker**: a 256-number embedding of their voice.
 
-Each "Them" line takes the speaker of the turn it overlaps most. Speakers whose voiceprint matches a [voice you've named](voices.md) get that name; the rest are numbered "Speaker 1", "Speaker 2"… in order of appearance. Each speaker is saved with its voiceprint (`speakers.voiceprint`), so you can name them later and Mel can learn from it.
+Each "Them" line takes the speaker of the turn it overlaps most. Speakers whose voiceprint matches a [voice you've named](05-voices.md) get that name; the rest are numbered "Speaker 1", "Speaker 2"… in order of appearance. Each speaker is saved with its voiceprint (`speakers.voiceprint`), so you can name them later and Mel can learn from it.
 
 Speaker detection is optional: it needs a free Hugging Face account to download the model ([setup](setup.md)). Without it, the transcript keeps "Me" and "Them".
 
@@ -41,3 +41,7 @@ Titling uses only the text, so it runs at the same time as speaker detection. Bo
 ## Doing it again
 
 `./mel transcribe <meeting>` (or **⋯ › Transcribe Again** in the app) repeats everything from the saved WAVs: cut, transcribe, detect speakers, title. The new speakers and segments replace the old ones in one transaction, so the previous transcript stays intact until the new one is complete. Useful after changing the model or the language, or if the server was down during the meeting.
+
+---
+
+[← 3. Transcription](03-transcription.md) · [5. Voices →](05-voices.md)

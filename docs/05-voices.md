@@ -1,4 +1,4 @@
-# Voices
+# 5. Voices
 
 Name a speaker once, and Mel recognizes them in every meeting, before and after.
 
@@ -36,3 +36,7 @@ Only other people are recognized: your microphone is always "Me".
 ## Managing voices
 
 **Settings › Voices** lists everyone Mel knows and lets you forget a voice: Mel stops recognizing them, and meetings where they were named keep the name. Voiceprints never leave your Mac.
+
+---
+
+[← 4. After the meeting](04-after-the-meeting.md) · [6. Data →](06-data.md)

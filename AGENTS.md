@@ -27,7 +27,7 @@ Follow [SETUP.md](SETUP.md). It takes a user from a fresh clone to a working fir
 | `db/` | The schema as numbered migrations, applied by `./mel` |
 | `docs/` | How everything works, with diagrams. Start at `docs/README.md` |
 
-- All data lives in SQLite (`docs/data.md`); query it with `./mel sql`. Change the schema only by adding the next `db/NNN_*.sql`; never edit one that has shipped. The server never touches the database.
+- All data lives in SQLite (`docs/06-data.md`); query it with `./mel sql`. Change the schema only by adding the next `db/NNN_*.sql`; never edit one that has shipped. The server never touches the database.
 - Python scripts declare their dependencies inline (PEP 723); run them with `uv run`, never pip.
 - `./mel build` rebuilds the recorder and the app (into `~/Applications/Mel.app`). Restart the app afterwards to see changes.
 - MLX work must stay on the server's single `mlx_thread`; MLX binds GPU streams to the thread that created them.

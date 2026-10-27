@@ -1,4 +1,4 @@
-# Architecture
+# 1. Overview
 
 Mel is four small programs. Each does one thing and talks to the next over a pipe or local HTTP.
 
@@ -81,8 +81,12 @@ Everything goes into one SQLite database, `mel.db`, in `~/Library/Application Su
 | `system.wav` | Everything the Mac played (the call), on the same timeline |
 | `meeting.wav` | Both mixed, for playback |
 
-[Data](data.md) describes the tables and how to query them. Downloaded models stay in the repository's `models/`.
+[Data](06-data.md) describes the tables and how to query them. Downloaded models stay in the repository's `models/`.
 
 ## Privacy
 
 Audio, transcripts and voiceprints stay on your Mac. The only network traffic is downloading models from Hugging Face during setup (or the first time you pick a new model in Settings). The server listens on `127.0.0.1` only.
+
+---
+
+[← Contents](README.md) · [2. Recording →](02-recording.md)
