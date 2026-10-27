@@ -36,9 +36,12 @@ let titleModels = [
     ModelOption(id: "mlx-community/Llama-3.2-1B-Instruct-4bit", name: "Llama 3.2 1B · smallest · 0.7 GB"),
 ]
 
-/// Languages the server detects among (settings.languages, set by `./mel setup`).
-var configuredLanguages: [String] {
-    (Database.shared.setting("languages") ?? "en,es").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+/// Languages offered in Settings: Whisper's most common ones. `./mel setup` accepts any Whisper code.
+let commonLanguages = ["en", "es", "pt", "fr", "de", "it", "nl", "pl", "ru", "tr", "ar", "hi", "ja", "ko", "zh"]
+
+/// A language's name in itself: "English", "Español", "Português".
+func languageName(_ code: String) -> String {
+    Locale(identifier: code).localizedString(forLanguageCode: code)?.capitalized(with: Locale(identifier: code)) ?? code
 }
 
 /// Runs `./mel <args>`, reporting output lines and exit status on the main queue.
@@ -185,6 +188,14 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var titleModel = titleModels[0].id {
         didSet { modelsChanged(key: "llm", value: titleModel, old: oldValue) }
     }
+    /// The languages spoken in your meetings: the server detects each sentence's language among these.
+    @Published var meetingLanguages = ["en", "es"] {
+        didSet {
+            guard loaded, !meetingLanguages.isEmpty else { return }
+            if language != "auto", !meetingLanguages.contains(language) { language = "auto" }
+            modelsChanged(key: "languages", value: meetingLanguages.joined(separator: ","), old: oldValue.joined(separator: ","))
+        }
+    }
 
     // Recording
     @Published var startedAt: Date?
@@ -220,6 +231,7 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
         mic = db.setting("mic") != "0"
         transcriptionModel = db.setting("model") ?? transcriptionModels[0].id
         titleModel = db.setting("llm") ?? titleModels[0].id
+        meetingLanguages = (db.setting("languages") ?? "en,es").split(separator: ",").map(String.init)
         loaded = true
         refresh()
         for voice in voices.values { recognize(voice.id) }  // apply names given in other meetings to earlier ones
@@ -243,7 +255,7 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func modelsChanged(key: String, value: String, old: String) {
         guard loaded, value != old else { return }
         db.setSetting(key, value)
-        // A running server keeps its models; restart it unless a recording is using it (then the next start picks them up).
+        // A running server keeps its models and languages; restart it unless a recording is using it (then the next start picks them up).
         guard !isRecording, server != .stopped else { return }
         serverLaunched = Date()
         server = .starting

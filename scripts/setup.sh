@@ -97,7 +97,7 @@ setup() {
   langs="$(tr -d ' ' <<<"${langs:-$current}" | tr 'A-Z' 'a-z')"
   [[ $langs =~ ^[a-z]{2,3}(,[a-z]{2,3})*$ ]] || { warn "\"$langs\" doesn't look like codes such as en,es; keeping $current."; langs="$current"; }
   set_setting languages "$langs"
-  ok "Languages: $langs (change them later by running ./mel setup again)"
+  ok "Languages: $langs (change them later in Mel's Settings)"
 
   step "Building Mel"
   run "Building the recorder" build_capture

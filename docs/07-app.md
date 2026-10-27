@@ -35,7 +35,7 @@ flowchart LR
 | Meeting | Editable title, date, speaker chips (click to name), transcript grouped by speaker, and a player along the bottom. Hovering a block turns its avatar into a play button. |
 | Recording | The transcript as it's written, with the time, language and Stop along the bottom. |
 | Floating transcript | A dark panel above every window and Space, with the transcript as chat bubbles (yours on the right), so you can follow it during a full-screen call. It's an `NSPanel` that never takes focus. |
-| Settings | Recording language and microphone, models, server status and logs, voices, storage. |
+| Settings | Recording language and microphone, the languages in your meetings, models, server status and logs, voices, storage. |
 
 ## Keyboard
 

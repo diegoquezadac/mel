@@ -2,7 +2,7 @@
 
 ## Languages and models
 
-Settings are rows of the `settings` table in `mel.db` ([data](06-data.md)). Setup writes the languages, the app's **Settings** everything else, and `./mel` passes the server's ones as environment variables every time it starts it. Environment variables you set yourself win.
+Settings are rows of the `settings` table in `mel.db` ([data](06-data.md)). Setup writes the languages, the app's **Settings** can change all of them, and `./mel` passes the server's ones as environment variables every time it starts it. Environment variables you set yourself win.
 
 | Setting | Default | |
 | --- | --- | --- |

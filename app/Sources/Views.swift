@@ -111,16 +111,17 @@ struct Sidebar: View {
 }
 
 /// Auto-detect plus each configured language (LANGUAGES in server/config.env, set by `./mel setup`), named in itself.
-let languages: [(String, String)] = {
-    let codes = configuredLanguages
-    let name = { (code: String) in Locale(identifier: code).localizedString(forLanguageCode: code)?.capitalized(with: Locale(identifier: code)) ?? code }
-    let auto = codes.count > 1 ? "Auto-detect (\(codes.map(name).joined(separator: ", ")))" : "Auto-detect"
-    return [("auto", auto)] + codes.map { ($0, name($0)) }
-}()
+/// Auto-detect plus each language picked in Settings, for the language menus.
+func languageOptions(_ codes: [String]) -> [(String, String)] {
+    let auto = codes.count > 1 ? "Auto-detect (\(codes.map(languageName).joined(separator: ", ")))" : "Auto-detect"
+    return [("auto", auto)] + codes.map { ($0, languageName($0)) }
+}
 
 struct LanguageOptions: View {
+    @EnvironmentObject var model: Model
+
     var body: some View {
-        ForEach(languages, id: \.0) { Text($0.1).tag($0.0) }
+        ForEach(languageOptions(model.meetingLanguages), id: \.0) { Text($0.1).tag($0.0) }
     }
 }
 
@@ -130,7 +131,7 @@ struct TranscribeOptions: View {
     let recording: Recording
 
     var body: some View {
-        ForEach(languages, id: \.0) { code, name in
+        ForEach(languageOptions(model.meetingLanguages), id: \.0) { code, name in
             Button(name) { model.transcribe(recording, language: code) }
         }
     }
@@ -595,7 +596,7 @@ struct RecorderBar: View {
                     .help("Skip this step; the audio and transcript are saved")
             } else {
                 Picker("Language", selection: $model.language) {
-                    ForEach(languages, id: \.0) { code, name in Text(code == "auto" ? "Auto-detect" : name).tag(code) }
+                    ForEach(languageOptions(model.meetingLanguages), id: \.0) { code, name in Text(code == "auto" ? "Auto-detect" : name).tag(code) }
                 }
                 .labelsHidden()
                 .fixedSize()
@@ -643,7 +644,23 @@ struct SettingsView: View {
             } header: {
                 Text("Recording")
             } footer: {
-                Text("Language is detected per sentence, so a meeting can switch languages. Turn off the microphone to record only what you hear.")
+                Text("Turn off the microphone to record only what you hear.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                ForEach(Array(Set(commonLanguages + model.meetingLanguages)).sorted { languageName($0) < languageName($1) }, id: \.self) { code in
+                    Toggle(languageName(code), isOn: Binding(
+                        get: { model.meetingLanguages.contains(code) },
+                        set: { on in
+                            if on { model.meetingLanguages.append(code) } else { model.meetingLanguages.removeAll { $0 == code } }
+                        }
+                    ))
+                    .disabled(model.meetingLanguages == [code]) // at least one
+                }
+            } header: {
+                Text("Languages in Your Meetings")
+            } footer: {
+                Text("Mel detects each sentence's language among these, so a meeting can switch between them. Pick only the ones you use: fewer languages means fewer mistakes.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {

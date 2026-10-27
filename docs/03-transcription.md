@@ -24,7 +24,7 @@ flowchart TD
 ```
 
 - **Encode once.** The encoder is the expensive half of Whisper. Its output is reused for language detection and decoding, instead of running it twice like `mlx_whisper.transcribe` would.
-- **Language per utterance.** Detection is limited to the languages you configured (`LANGUAGES`, `en,es` by default), so a short Spanish sentence isn't mistaken for Portuguese. Since every utterance is detected separately, a meeting can switch languages at any point.
+- **Language per utterance.** Detection is limited to the languages in your meetings (Settings › Languages, `en,es` by default), so a short Spanish sentence isn't mistaken for Portuguese. Since every utterance is detected separately, a meeting can switch languages at any point.
 - **Fast path, safe fallback.** Most utterances need a single greedy decode. When Whisper's own signals look bad (compression ratio above 2.4 means it's repeating itself; average log-probability below −1 means it's unsure), the utterance goes through the full pipeline, which retries at higher temperatures.
 - **Timestamps.** Whisper emits timestamp tokens every 20 ms; segments are split at them, then offset by the utterance's position in the meeting.
 
