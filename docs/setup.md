@@ -7,7 +7,7 @@ The wizard (`scripts/setup.sh`) checks before doing anything, so running it agai
 ```mermaid
 flowchart TD
     A["1 · Check the Mac<br/>Apple Silicon, macOS 15+"] --> B["2 · Developer tools<br/>Xcode Command Line Tools, uv"]
-    B --> C["3 · Languages<br/>→ server/config.env"]
+    B --> C["3 · Languages<br/>→ mel.db settings"]
     C --> D["4 · Build<br/>recorder, app, signing certificate<br/>→ ~/Applications/Mel.app"]
     D --> E["5 · Models<br/>Whisper, Qwen3 (~4 GB)<br/>→ models/"]
     E --> F{"6 · Speaker detection?<br/>(optional)"}
@@ -54,4 +54,4 @@ security delete-certificate -c "Mel local signing"
 tccutil reset All local.mel
 ```
 
-Then delete the repository folder, which holds your recordings and models.
+Then delete the repository folder (models) and `~/Library/Application Support/Mel` (your meetings).

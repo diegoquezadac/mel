@@ -260,7 +260,7 @@ struct MeetingView: View {
         }
         .task(id: "\(recording.id)|\(model.revision)|\(recording.hasTranscript)") {
             entries = model.entries(for: recording)
-            title = recording.label
+            if !editingTitle { title = recording.label } // a recording elsewhere refreshes this while you type
         }
     }
 

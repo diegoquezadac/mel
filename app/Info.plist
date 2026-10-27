@@ -22,5 +22,7 @@
     <string>Mel records your microphone during meetings.</string>
     <key>MelRoot</key>
     <string>__ROOT__</string>
+    <key>MelData</key>
+    <string>__DATA__</string>
 </dict>
 </plist>

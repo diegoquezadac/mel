@@ -1,5 +1,5 @@
 # Interactive setup (`./mel setup`) and health check (`./mel doctor`). Sourced by ./mel, which defines
-# ROOT, APP, CONFIG and the build_* / start_server helpers. Every step checks first, so it can run again.
+# ROOT, APP, DB and the build_* / start_server / setting helpers, and creates the database first. Every step checks first, so it can run again.
 
 SETUP_LOG="$ROOT/setup.log"
 HF="uvx --quiet --from huggingface_hub hf"
@@ -46,12 +46,6 @@ run() {
   fi
 }
 
-# config_get KEY / config_set KEY value: server/config.env, shared with the app's Settings.
-config_get() { [[ -f "$CONFIG" ]] && sed -n "s/^$1=//p" "$CONFIG" | tail -1; }
-config_set() {
-  touch "$CONFIG"
-  { grep -v "^$1=" "$CONFIG" || true; echo "$1=$2"; } >"$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
-}
 
 find_uv() {
   command -v uv >/dev/null && return
@@ -61,7 +55,7 @@ find_uv() {
 hf_logged_in() { $HF auth whoami >/dev/null 2>&1; }
 speakers_ready() { [[ -d "$ROOT/models/hub/models--pyannote--speaker-diarization-community-1/snapshots" ]]; }
 models_ready() {
-  local whisper; whisper="$(config_get MODEL)"; whisper="${whisper:-mlx-community/whisper-large-v3-turbo}"
+  local whisper; whisper="$(setting model)"
   [[ -d "$ROOT/models/hub/models--${whisper//\//--}/snapshots" ]]
 }
 
@@ -96,13 +90,13 @@ setup() {
   fi
 
   step "Languages"
-  local current; current="$(config_get LANGUAGES)"; current="${current:-en,es}"
+  local current; current="$(setting languages)"
   note "Mel detects the language of every sentence among the ones spoken in your meetings,"
   note "so a meeting can switch between them. Use language codes: en, es, pt, fr, de, it…"
   read -r -p "  Languages in your meetings [$current]: " langs </dev/tty || true
   langs="$(tr -d ' ' <<<"${langs:-$current}" | tr 'A-Z' 'a-z')"
   [[ $langs =~ ^[a-z]{2,3}(,[a-z]{2,3})*$ ]] || { warn "\"$langs\" doesn't look like codes such as en,es; keeping $current."; langs="$current"; }
-  config_set LANGUAGES "$langs"
+  set_setting languages "$langs"
   ok "Languages: $langs (change them later by running ./mel setup again)"
 
   step "Building Mel"
@@ -189,8 +183,8 @@ doctor() {
   check "Models downloaded" 'models_ready' "Run ./mel setup."
   if speakers_ready; then ok "Speaker detection"; else warn "Speaker detection not set up (optional): run ./mel setup."; fi
   check "Transcription server" 'curl -sf http://127.0.0.1:8765/health' "Start it with ./mel server; see ./mel logs if it doesn't come up."
-  local langs; langs="$(config_get LANGUAGES || true)"
-  note "Languages: ${langs:-en,es (default)}"
+  check "Database ($DB)" '[[ "$(sqlite3 "$DB" "PRAGMA user_version")" -gt 0 ]]' "Run ./mel init."
+  note "$(sqlite3 "$DB" "SELECT (SELECT count(*) FROM meetings) || ' meetings, ' || (SELECT count(*) FROM people) || ' people; languages ' || (SELECT value FROM settings WHERE key = 'languages')")"
   note "Recording permissions can only be checked by recording: if Mel hears nothing, allow it in"
   note "System Settings › Privacy & Security › Microphone and › Screen & System Audio Recording, then reopen it."
   printf "\n"

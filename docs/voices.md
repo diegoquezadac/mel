@@ -4,8 +4,8 @@ Name a speaker once, and Mel recognizes them in every meeting, before and after.
 
 ```mermaid
 flowchart TD
-    N["You name 'Speaker 2' → Ana<br/>in a meeting"] --> R["Rename in transcript<br/>and speakers.json"]
-    R --> L["Learn: add Ana's voiceprint<br/>to voices.json"]
+    N["You name 'Speaker 2' → Ana<br/>in a meeting"] --> R["Link the speaker<br/>to the person Ana"]
+    R --> L["Learn: fold the speaker's voiceprint<br/>into Ana's"]
     L --> P["Earlier meetings:<br/>an unnamed speaker that<br/>sounds like Ana becomes Ana"]
     L --> F["Later meetings:<br/>speaker detection names<br/>matching voices"]
 ```
@@ -22,13 +22,9 @@ Speaker detection gives every speaker in a meeting a voiceprint: a 256-number ve
 
 ## Learning
 
-`voices.json` keeps one vector per name and how many meetings it came from:
+Each person is a row of `people` with one voiceprint and how many meetings it came from. Naming a speaker links them to that person (`speakers.person_id`), creating the person if needed, and folds the speaker's voiceprint into the person's: an average weighted by meeting count. Different microphones, rooms and connections all feed one profile, so recognition improves the more you name.
 
-```json
-{ "Ana": { "embedding": [0.012, -0.044, …], "meetings": 3 } }
-```
-
-Each time you name someone, their voiceprint is averaged into their vector, weighted by meeting count. Different microphones, rooms and connections all feed one profile, so recognition improves the more you name.
+The transcript itself isn't rewritten: a speaker's name is the linked person's name, or the speaker's label ("Speaker 2") when there's no person. Renaming a person renames them in every meeting at once.
 
 ## Recognizing
 
@@ -39,4 +35,4 @@ Only other people are recognized: your microphone is always "Me".
 
 ## Managing voices
 
-**Settings › Voices** lists everyone Mel knows and lets you forget a voice. Voiceprints never leave your Mac.
+**Settings › Voices** lists everyone Mel knows and lets you forget a voice: Mel stops recognizing them, and meetings where they were named keep the name. Voiceprints never leave your Mac.

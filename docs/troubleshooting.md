@@ -36,4 +36,4 @@ Whisper sometimes writes "Thank you." or "Gracias." for near-silence; Mel filter
 
 ## Something else
 
-`setup.log` has the output of the last setup, `server/server.log` the server's. Please include both when you open an issue.
+`setup.log` has the output of the last setup, `server/server.log` the server's. Please include both when you open an issue, but never your database or recordings: they hold your conversations.

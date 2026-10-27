@@ -11,10 +11,12 @@ import collections
 import contextlib
 import datetime as dt
 import json
+import os
 import queue
 import re
 import shutil
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -34,8 +36,10 @@ FRAME = 480  # 30 ms analysis frames
 HEADER = struct.Struct("<BdI")  # source, pts seconds, frame count
 TRACKS = {0: "mic", 1: "system"}
 SPEAKERS = {"mic": "Me", "system": "Them"}
-VOICES = ROOT / "voices.json"  # {name: {"embedding": [...], "meetings": n}}, learned when you name a speaker in the app
 VOICE_MATCH = 0.75  # cosine similarity; the same voice scores ~0.9, different voices well below
+# mel.db and Recordings/; ./mel sets MEL_DATA and creates the database (db/*.sql).
+DATA = Path(os.environ.get("MEL_DATA", Path.home() / "Library" / "Application Support" / "Mel"))
+RECORDINGS = DATA / "Recordings"
 
 
 def ts(seconds: float) -> str:
@@ -56,27 +60,65 @@ def open_wav(path: Path) -> wave.Wave_write:
     return w
 
 
-def match_voices(voiceprints: dict[str, list[float]]) -> dict[str, str]:
-    """Map diarization labels to named voices, best matches first, each name used once."""
-    try:
-        voices = json.loads(VOICES.read_text())
-    except (OSError, ValueError):
-        return {}
+def pack(voiceprint) -> bytes:
+    """A voiceprint as stored in the database: unit-length float32."""
+    v = np.asarray(voiceprint, dtype=np.float32)
+    return (v / (np.linalg.norm(v) or 1.0)).astype("<f4").tobytes()
 
-    def unit(v):
-        v = np.asarray(v, dtype=np.float64)
-        return v / (np.linalg.norm(v) or 1.0)
 
+def unpack(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype="<f4")
+
+
+class Store:
+    """mel.db. One connection shared by the recording threads, so every call takes the lock."""
+
+    def __init__(self):
+        if not (DATA / "mel.db").exists():
+            sys.exit(f"no database in {DATA}: run ./mel init")
+        self.db = sqlite3.connect(DATA / "mel.db", check_same_thread=False, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
+        self.db.execute("PRAGMA busy_timeout = 5000")
+        self.lock = threading.RLock()
+
+    def run(self, sql: str, *args) -> sqlite3.Cursor:
+        with self.lock:
+            return self.db.execute(sql, args)
+
+    def one(self, sql: str, *args) -> sqlite3.Row | None:
+        return self.run(sql, *args).fetchone()
+
+    @contextlib.contextmanager
+    def transaction(self):
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+
+    def setting(self, key: str, default: str) -> str:
+        row = self.one("SELECT value FROM settings WHERE key = ?", key)
+        return row["value"] if row else default
+
+
+def match_voices(store: Store, voiceprints: dict[str, list[float]]) -> dict[str, sqlite3.Row]:
+    """Map diarization labels to people, best matches first, each person used once."""
+    people = store.run("SELECT id, name, voiceprint FROM people").fetchall()
     pairs = sorted(
-        ((float(unit(vec) @ unit(voice["embedding"])), label, name) for label, vec in voiceprints.items() for name, voice in voices.items()),
+        ((float(unpack(pack(vec)) @ unpack(person["voiceprint"])), label, person) for label, vec in voiceprints.items() for person in people),
+        key=lambda p: p[0],
         reverse=True,
     )
-    matches: dict[str, str] = {}
-    for similarity, label, name in pairs:
+    matches: dict[str, sqlite3.Row] = {}
+    for similarity, label, person in pairs:
         if similarity < VOICE_MATCH:
             break
-        if label not in matches and name not in matches.values():
-            matches[label] = name
+        if label not in matches and person["id"] not in {p["id"] for p in matches.values()}:
+            matches[label] = person
     return matches
 
 
@@ -210,11 +252,20 @@ class Server:
 
 
 class Transcript:
-    def __init__(self, folder: Path):
-        self.folder = folder
+    """A meeting's segments. Live recordings insert each one as it's transcribed, so the app shows them;
+    save() then writes the final speakers and segments in one transaction."""
+
+    def __init__(self, store: Store, meeting: int, live: bool):
+        self.store, self.meeting, self.live = store, meeting, live
         self.entries: list[dict] = []
+        self.people: dict[str, int] = {}  # speaker label -> person id, from voice recognition
+        self.voiceprints: dict[str, list[float]] = {}
         self.lock = threading.Lock()
-        self.live = open(folder / "transcript.md", "w")
+        if live:
+            self.speaker_ids = {}
+            for label in SPEAKERS.values():
+                store.run("INSERT OR IGNORE INTO speakers (meeting_id, label) VALUES (?, ?)", meeting, label)
+                self.speaker_ids[label] = store.one("SELECT id FROM speakers WHERE meeting_id = ? AND label = ?", meeting, label)["id"]
 
     def add(self, track: str, offset: float, result: dict):
         for seg in result["segments"]:
@@ -230,20 +281,19 @@ class Transcript:
             }
             with self.lock:
                 self.entries.append(entry)
-                self.live.write(self.format(entry) + "\n\n")
-                self.live.flush()
+            if self.live:
+                self.store.run(
+                    "INSERT INTO segments (meeting_id, speaker_id, start, end, language, text) VALUES (?, ?, ?, ?, ?, ?)",
+                    self.meeting, self.speaker_ids[entry["speaker"]], entry["start"], entry["end"], entry["language"], text,
+                )
             print(f"[{ts(entry['start'])}] {entry['speaker']} ({entry['language']}): {text}", flush=True)
-
-    @staticmethod
-    def format(entry: dict) -> str:
-        return f"[{ts(entry['start'])}] **{entry['speaker']}**: {entry['text']}"
 
     def label_speakers(self, turns: list[dict], voiceprints: dict[str, list[float]]):
         """Rename "Them" entries after the diarization turn that overlaps each one most.
 
-        Speakers whose voice matches a named voice get that name; the rest become "Speaker N".
+        Speakers whose voice matches a person keep their name as label; the rest become "Speaker N".
         """
-        known = match_voices(voiceprints)
+        known = match_voices(self.store, voiceprints)
         names: dict[str, str] = {}
         for entry in sorted(self.entries, key=lambda e: e["start"]):
             if entry["speaker"] != SPEAKERS["system"]:
@@ -255,20 +305,30 @@ class Transcript:
                 label = best[0]
                 if label not in names:
                     unknown = sum(1 for n in names.values() if n.startswith("Speaker "))
-                    names[label] = known.get(label) or f"Speaker {unknown + 1}"
+                    names[label] = known[label]["name"] if label in known else f"Speaker {unknown + 1}"
+                    if label in known:
+                        self.people[names[label]] = known[label]["id"]
                 entry["speaker"] = names[label]
-        # Kept with the meeting so the app can learn a voice when you name a speaker.
+        # Kept with each speaker so the app can learn a voice when you name them.
         self.voiceprints = {name: voiceprints[label] for label, name in names.items() if label in voiceprints}
 
-    def finalize(self):
-        """Rewrite the transcript in time order (live output is in completion order)."""
-        self.live.close()
+    def save(self):
+        """Replace the meeting's speakers and segments with the final ones."""
         entries = sorted(self.entries, key=lambda e: e["start"])
-        body = "\n\n".join(self.format(e) for e in entries)
-        (self.folder / "transcript.md").write_text(f"# {self.folder.name}\n\n{body}\n")
-        (self.folder / "transcript.json").write_text(json.dumps(entries, ensure_ascii=False, indent=2))
-        if getattr(self, "voiceprints", None):
-            (self.folder / "speakers.json").write_text(json.dumps(self.voiceprints, ensure_ascii=False))
+        with self.store.transaction():
+            self.store.run("DELETE FROM speakers WHERE meeting_id = ?", self.meeting)  # cascades to segments
+            ids = {}
+            for label in dict.fromkeys(e["speaker"] for e in entries):
+                voiceprint = self.voiceprints.get(label)
+                ids[label] = self.store.run(
+                    "INSERT INTO speakers (meeting_id, label, person_id, voiceprint) VALUES (?, ?, ?, ?)",
+                    self.meeting, label, self.people.get(label), pack(voiceprint) if voiceprint else None,
+                ).lastrowid
+            for e in entries:
+                self.store.run(
+                    "INSERT INTO segments (meeting_id, speaker_id, start, end, language, text) VALUES (?, ?, ?, ?, ?, ?)",
+                    self.meeting, ids[e["speaker"]], e["start"], e["end"], e["language"], e["text"],
+                )
 
 
 class Pipeline:
@@ -292,7 +352,7 @@ class Pipeline:
     def _run(self, wait: float):
         self.available = self.server.wait_ready(wait)
         if not self.available:
-            print("! transcription server unavailable: recording audio only. Run `./mel transcribe <folder>` later.")
+            print("! transcription server unavailable: recording audio only. Run `./mel transcribe <meeting>` later.")
         while True:
             track, offset, pcm = self.queue.get()
             try:
@@ -328,40 +388,34 @@ def diarize(server: Server, folder: Path, transcript: Transcript):
         print(f"! speaker detection skipped: {detail}")
 
 
-def name_meeting(server: Server, folder: Path, transcript: Transcript) -> Path:
-    """Give an unnamed meeting a title from its transcript by adding it to the folder name."""
-    if len(folder.name) > 16 or not transcript.entries:  # already labeled (<date>_<time>_<label>) or nothing said
-        return folder
+def name_meeting(server: Server, transcript: Transcript):
+    """Give an untitled meeting a title from its transcript."""
+    row = transcript.store.one("SELECT title FROM meetings WHERE id = ?", transcript.meeting)
+    if row["title"] or not transcript.entries:  # titled by you, or nothing was said
+        return
     print("Naming meeting…", flush=True)
     text = "\n".join(f"{e['speaker']}: {e['text']}" for e in sorted(transcript.entries, key=lambda e: e["start"]))
     try:
         title = server.title(text)
     except KeyboardInterrupt:
         print("Skipped naming.")
-        return folder
+        return
     except Exception as e:
         print(f"! naming skipped: {e}")
-        return folder
-    slug = re.sub(r"[\s/:]+", "-", title).strip("-")
-    target = folder.with_name(f"{folder.name}_{slug}")
-    if not slug or target.exists():
-        return folder
-    folder.rename(target)
-    transcript.folder = target
-    print(f"Titled “{title}” → {target}", flush=True)
-    return target
+        return
+    if title:
+        transcript.store.run("UPDATE meetings SET title = ? WHERE id = ?", title, transcript.meeting)
+        print(f"Titled “{title}”", flush=True)
 
 
-def finish_meeting(server: Server, folder: Path, transcript: Transcript) -> Path:
+def finish_meeting(server: Server, folder: Path, transcript: Transcript):
     """Detect speakers and name the meeting at the same time; each can be skipped."""
-    named = [folder]
-    namer = threading.Thread(target=lambda: named.__setitem__(0, name_meeting(server, folder, transcript)), daemon=True)
-    namer.start()  # the title only needs the text; diarize reads system.wav long before the rename
+    namer = threading.Thread(target=name_meeting, args=(server, transcript), daemon=True)
+    namer.start()  # the title only needs the text
     with skippable():
         diarize(server, folder, transcript)
     with skippable():
         namer.join()
-    return named[0]
 
 
 def ignore_stops():
@@ -372,7 +426,7 @@ def ignore_stops():
 
 @contextlib.contextmanager
 def skippable():
-    """Ctrl+C (or the app's Skip) skips only the step inside this block; the files are saved either way."""
+    """Ctrl+C (or the app's Skip) skips only the step inside this block; the meeting is saved either way."""
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
@@ -408,21 +462,31 @@ def mix(folder: Path):
         w.writeframes(np.clip(out, -32768, 32767).astype(np.int16).tobytes())
 
 
+def wav_seconds(folder: Path) -> float:
+    lengths = [wave.open(str(p)).getnframes() for p in (folder / f"{n}.wav" for n in TRACKS.values()) if p.exists()]
+    return max(lengths, default=0) / RATE
+
+
 def record(args):
     if not CAPTURE_BIN.exists():
         sys.exit(f"capture tool not built: run `./mel setup` ({CAPTURE_BIN})")
-    name = dt.datetime.now().strftime("%Y-%m-%d_%H-%M") + (f"_{args.name}" if args.name else "")
-    folder = Path(args.out) / name
+    store = Store()
+    started = dt.datetime.now()
+    folder = RECORDINGS / started.strftime("%Y-%m-%d_%H-%M-%S")
     folder.mkdir(parents=True, exist_ok=True)
+    meeting = store.run(
+        "INSERT INTO meetings (title, started_at, folder, language) VALUES (?, ?, ?, ?)",
+        args.title, started.isoformat(timespec="seconds"), folder.name, args.language,
+    ).lastrowid
 
-    transcript = Transcript(folder)
+    transcript = Transcript(store, meeting, live=True)
     pipeline = Pipeline(Server(args.server), transcript, args.language)
     pipeline.start(wait=600)
     threading.Thread(target=watch_commands, args=(pipeline,), daemon=True).start()
     tracks = {i: Track(n, folder / f"{n}.wav", pipeline.submit) for i, n in TRACKS.items()}
 
     proc = subprocess.Popen([str(CAPTURE_BIN)] + (["--no-mic"] if args.no_mic else []), stdout=subprocess.PIPE)
-    print(f"● Recording → {folder}\n  Press Ctrl+C to stop.\n", flush=True)
+    print(f"● Recording → meeting {meeting} ({folder})\n  Press Ctrl+C to stop.\n", flush=True)
     t0 = None
     try:
         while header := read_exact(proc.stdout, HEADER.size):
@@ -444,27 +508,34 @@ def record(args):
     for track in tracks.values():
         track.close()
     if t0 is None:  # the folder holds only empty WAV headers
-        transcript.live.close()
+        store.run("DELETE FROM meetings WHERE id = ?", meeting)
         shutil.rmtree(folder)
         sys.exit("! no audio was captured: allow Screen & System Audio Recording and Microphone for the app running mel "
                  "(your terminal or Mel) in System Settings › Privacy & Security, then restart that app")
+    store.run("UPDATE meetings SET status = 'processing', duration = ? WHERE id = ?", wav_seconds(folder), meeting)
     with skippable():
         pipeline.finish()
     mix(folder)
     if pipeline.available:
-        folder = finish_meeting(pipeline.server, folder, transcript)
-    transcript.finalize()
-    print(f"✓ Saved {folder}  (meeting.wav, mic.wav, system.wav, transcript.md, transcript.json)")
+        finish_meeting(pipeline.server, folder, transcript)
+    transcript.save()
+    store.run("UPDATE meetings SET status = 'done' WHERE id = ?", meeting)
+    print(f"✓ Saved meeting {meeting}", flush=True)
 
 
 def transcribe(args):
-    """Re-transcribe a saved recording folder, e.g. if the server was down during the meeting."""
-    folder = Path(args.folder)
+    """Transcribe a meeting again from its audio, e.g. with another model or language."""
+    store = Store()
+    row = store.one("SELECT folder FROM meetings WHERE id = ?", args.meeting)
+    if row is None:
+        sys.exit(f"no meeting {args.meeting} (list them with ./mel sql \"SELECT id, title FROM meetings\")")
+    folder = RECORDINGS / row["folder"]
     if not (folder / "meeting.wav").exists():  # the recording was cut off before mixing
         mix(folder)
     server = Server(args.server)
     if not server.wait_ready(600):
         sys.exit("transcription server unavailable (try `./mel logs`)")
+    store.run("UPDATE meetings SET status = 'processing', duration = ? WHERE id = ?", wav_seconds(folder), args.meeting)
     chunks = []
     for name in TRACKS.values():
         if (path := folder / f"{name}.wav").exists():
@@ -472,30 +543,52 @@ def transcribe(args):
             segmenter = Segmenter(lambda start, pcm, name=name: chunks.append((name, start, pcm)))
             segmenter.feed(read_wav(path))
             segmenter.flush()
-    transcript = Transcript(folder)
-    for i, (name, start, pcm) in enumerate(sorted(chunks, key=lambda c: c[1]), 1):
-        print(f"({i}/{len(chunks)})", end=" ", flush=True)
-        transcript.add(name, start, server.transcribe(pcm, args.language))
-    folder = finish_meeting(server, folder, transcript)
-    transcript.finalize()
-    print(f"✓ Wrote {folder / 'transcript.md'}")
+    transcript = Transcript(store, args.meeting, live=False)
+    try:
+        for i, (name, start, pcm) in enumerate(sorted(chunks, key=lambda c: c[1]), 1):
+            print(f"({i}/{len(chunks)})", end=" ", flush=True)
+            transcript.add(name, start, server.transcribe(pcm, args.language))
+        finish_meeting(server, folder, transcript)
+        transcript.save()  # the previous transcript stays until here
+    finally:
+        store.run("UPDATE meetings SET status = 'done' WHERE id = ?", args.meeting)
+    print(f"✓ Transcribed meeting {args.meeting}")
+
+
+def export(args):
+    """Print a meeting as Markdown."""
+    store = Store()
+    meeting = store.one("SELECT title, started_at FROM meetings WHERE id = ?", args.meeting)
+    if meeting is None:
+        sys.exit(f"no meeting {args.meeting}")
+    rows = store.run(
+        """SELECT s.start, COALESCE(p.name, sp.label) AS speaker, s.text FROM segments s
+           JOIN speakers sp ON sp.id = s.speaker_id LEFT JOIN people p ON p.id = sp.person_id
+           WHERE s.meeting_id = ? ORDER BY s.start""",
+        args.meeting,
+    ).fetchall()
+    print(f"# {meeting['title'] or 'Untitled meeting'}\n\n{meeting['started_at'].replace('T', ' ')}\n")
+    print("\n\n".join(f"[{ts(r['start'])}] **{r['speaker']}**: {r['text']}" for r in rows))
 
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--server", default="http://127.0.0.1:8765")
-    common.add_argument("--language", default="auto", help="auto (detected per utterance among LANGUAGES) or a language code such as en")
+    common.add_argument("--language", help="auto (detected per utterance among LANGUAGES) or a language code such as en; default: the app's setting")
     parser = argparse.ArgumentParser(prog="mel", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     rec = sub.add_parser("record", parents=[common], help="record and transcribe live")
-    rec.add_argument("name", nargs="?", help="optional label for the recording folder")
-    rec.add_argument("--out", default=str(ROOT / "recordings"))
+    rec.add_argument("title", nargs="?", help="title for the meeting (otherwise one is written from the transcript)")
     rec.add_argument("--no-mic", action="store_true", help="only capture system audio")
-    tr = sub.add_parser("transcribe", parents=[common], help="transcribe a saved recording folder")
-    tr.add_argument("folder")
+    tr = sub.add_parser("transcribe", parents=[common], help="transcribe a meeting again")
+    tr.add_argument("meeting", type=int)
+    ex = sub.add_parser("export", help="print a meeting as Markdown")
+    ex.add_argument("meeting", type=int)
     args = parser.parse_args()
-    signal.signal(signal.SIGTERM, signal.default_int_handler)  # the menu bar app stops recordings with SIGTERM
-    {"record": record, "transcribe": transcribe}[args.command](args)
+    if hasattr(args, "language") and args.language is None:
+        args.language = Store().setting("language", "auto")
+    signal.signal(signal.SIGTERM, signal.default_int_handler)  # the app stops recordings with SIGTERM
+    {"record": record, "transcribe": transcribe, "export": export}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -39,12 +39,9 @@ If uv is missing, ask before installing, then run `curl -LsSf https://astral.sh/
 Ask which languages are spoken in the user's meetings. Mel detects among these only, per sentence. Write them as Whisper codes:
 
 ```sh
-mkdir -p server && touch server/config.env
-grep -v '^LANGUAGES=' server/config.env > server/config.env.tmp; echo 'LANGUAGES=en,es' >> server/config.env.tmp
-mv server/config.env.tmp server/config.env
+./mel init      # creates ~/Library/Application Support/Mel/mel.db
+./mel sql "UPDATE settings SET value = 'en,es' WHERE key = 'languages'"
 ```
-
-Keep any other lines in that file (`MODEL`, `LLM`).
 
 ## 4. Build
 

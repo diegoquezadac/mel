@@ -173,7 +173,11 @@ def diarize_audio(audio: np.ndarray) -> tuple[list[dict], dict[str, list[float]]
     output = load_diarizer()({"waveform": torch.from_numpy(audio)[None], "sample_rate": 16000})
     # Overlap-free turns line up better with transcript segments; voiceprints come in speaker_diarization label order.
     turns = [{"start": t.start, "end": t.end, "speaker": s} for t, _, s in output.exclusive_speaker_diarization.itertracks(yield_label=True)]
-    voiceprints = dict(zip(output.speaker_diarization.labels(), output.speaker_embeddings.tolist()))
+    voiceprints = {
+        label: vector.tolist()
+        for label, vector in zip(output.speaker_diarization.labels(), output.speaker_embeddings)
+        if np.isfinite(vector).all()  # a speaker heard too briefly gets no usable embedding (NaN)
+    }
     return turns, voiceprints
 
 

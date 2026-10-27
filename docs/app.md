@@ -1,6 +1,6 @@
 # The app
 
-`Mel.app` is a SwiftUI app (`app/Sources`) in two files: `App.swift` holds the state and talks to `./mel`, `Views.swift` the interface. It follows the standard macOS layout: a sidebar of meetings grouped by day, a detail page, a toolbar and a Settings window.
+`Mel.app` is a SwiftUI app (`app/Sources`) in three files: `App.swift` holds the state and talks to `./mel`, `Database.swift` to `mel.db`, `Views.swift` is the interface. It follows the standard macOS layout: a sidebar of meetings grouped by day, a detail page, a toolbar and a Settings window.
 
 ## A thin layer over `./mel`
 
@@ -13,19 +13,20 @@ flowchart LR
         views["Views"]
     end
     model -- "./mel start --language xx" --> rec["recording"]
-    rec -- "stdout lines" --> model
+    rec -- "meeting id, status" --> model
     model -- "stdin: language es" --> rec
-    model -- "./mel transcribe folder" --> tr["re-transcription"]
+    model -- "./mel transcribe id" --> tr["re-transcription"]
     model -- "./mel server / stop" --> srv["server"]
     model -- "GET /health every 2 s" --> srv
-    model -- "reads and edits" --> files[("recordings/<br/>voices.json<br/>config.env")]
+    model -- "reads and edits" --> files[("mel.db")]
     views --> model
 ```
 
-- **Recording** runs `./mel start` and reads its output line by line: `[00:01:02] Them (es): …` becomes a live transcript entry, `Titled “…” → folder` tells it the final folder. Changing the language writes `language es` to the recording's stdin.
+- **Recording** runs `./mel start`. The first output line says which meeting it is (`● Recording → meeting 12`), and the transcript comes from that meeting's segments as the client inserts them: once a second, the app checks `PRAGMA data_version` and re-reads only when another process committed. Changing the language writes `language es` to the recording's stdin.
 - **Stopping** sends `SIGTERM` once. **Skip** sends another, which skips the current step ([after the meeting](after-the-meeting.md)).
 - **The server** starts when the app opens and stops when you quit, unless a recording started from the terminal is still using it.
-- **Editing** works on the files directly: renaming a meeting renames its folder; naming a speaker rewrites `transcript.json` and `transcript.md` in the client's format, updates `speakers.json` and [learns the voice](voices.md).
+- **Editing** is SQL on `mel.db` ([data](data.md)): renaming a meeting updates its title; naming a speaker links them to a person and [learns the voice](voices.md); Move to Trash moves the audio folder to the Trash and deletes the meeting's rows. Settings are rows of `settings`.
+- **The database** is opened through `app/Sources/Database.swift`, a small wrapper over SQLite's C API, after `./mel init` has created or migrated it.
 
 ## Pages
 

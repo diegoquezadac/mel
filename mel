@@ -6,7 +6,9 @@ BIN="$ROOT/capture/.build/release/mel-capture"
 PID="$ROOT/server/server.pid"
 LOG="$ROOT/server/server.log"
 APP="$HOME/Applications/Mel.app"
-CONFIG="$ROOT/server/config.env"
+# Your data: mel.db (meetings, transcripts, people, settings) and Recordings/ (audio). The client reads MEL_DATA.
+export MEL_DATA="${MEL_DATA:-$HOME/Library/Application Support/Mel}"
+DB="$MEL_DATA/mel.db"
 IDENTITY="Mel local signing"
 build_capture() { swift build -c release --package-path "$ROOT/capture"; }
 # macOS ties recording permissions to the app's signature. An ad-hoc signature changes on every
@@ -42,13 +44,26 @@ build_app() {
   rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp "$ROOT/app/.build/release/mel-app" "$APP/Contents/MacOS/Mel"
   cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
-  sed "s|__ROOT__|$ROOT|" "$ROOT/app/Info.plist" >"$APP/Contents/Info.plist"
+  sed -e "s|__ROOT__|$ROOT|" -e "s|__DATA__|$MEL_DATA|" "$ROOT/app/Info.plist" >"$APP/Contents/Info.plist"
   ensure_identity
   codesign --force --sign "$IDENTITY" "$APP"
 }
+# Creates the database and applies every db/NNN_*.sql newer than its PRAGMA user_version, each in one transaction.
+ensure_db() {
+  mkdir -p "$MEL_DATA/Recordings"
+  local version file n
+  version="$(sqlite3 "$DB" "PRAGMA journal_mode = WAL; PRAGMA user_version;" | tail -1)"
+  for file in "$ROOT"/db/[0-9][0-9][0-9]_*.sql; do
+    n=$((10#$(basename "$file" | cut -c1-3)))
+    ((n > version)) || continue
+    { echo "BEGIN;"; cat "$file"; echo "PRAGMA user_version = $n; COMMIT;"; } | sqlite3 -bail "$DB"
+  done
+}
+setting() { sqlite3 "$DB" "SELECT value FROM settings WHERE key = '$1'"; }
+set_setting() { sqlite3 "$DB" "INSERT INTO settings (key, value) VALUES ('$1', '$2') ON CONFLICT (key) DO UPDATE SET value = excluded.value"; }
+# The server reads its languages and models from the environment; environment variables set by hand win.
+load_config() { export LANGUAGES="${LANGUAGES:-$(setting languages)}" MODEL="${MODEL:-$(setting model)}" LLM="${LLM:-$(setting llm)}"; }
 running() { [[ -f "$PID" ]] && kill -0 "$(cat "$PID")" 2>/dev/null; }
-# Languages (./mel setup) and models (the app's Settings); environment variables still work without it.
-load_config() { if [[ -f "$CONFIG" ]]; then set -a; . "$CONFIG"; set +a; fi; }
 start_server() {
   running && return
   load_config
@@ -59,6 +74,7 @@ stop_server() { running && kill "$(cat "$PID")"; rm -f "$PID"; }
 
 cmd="${1:-help}"
 shift || true
+case "$cmd" in build | help | -h | --help) ;; *) ensure_db ;; esac
 case "$cmd" in
   setup)      . "$ROOT/scripts/setup.sh"; setup ;;
   doctor)     . "$ROOT/scripts/setup.sh"; doctor ;;
@@ -69,6 +85,10 @@ case "$cmd" in
   start)      [[ -x "$BIN" ]] || build_capture; start_server
               exec uv run --quiet "$ROOT/client/mel.py" record "$@" ;;
   transcribe) start_server; exec uv run --quiet "$ROOT/client/mel.py" transcribe "$@" ;;
+  export)     exec uv run --quiet "$ROOT/client/mel.py" export "$@" ;;
+  sql)        exec sqlite3 -box -cmd "PRAGMA foreign_keys = ON" "$DB" "$@" ;;
+  import)     exec uv run --quiet "$ROOT/scripts/import.py" "$@" ;;
+  init)       ;;
   stop)       stop_server ;;
   logs)       touch "$LOG"; tail -f "$LOG" ;;
   *)          cat <<USAGE
@@ -77,10 +97,13 @@ usage: ./mel <command>
   setup                     install or update Mel, step by step
   doctor                    check that everything is in place
   app                       open the app
-  start [name]              record from the terminal (Ctrl+C to stop)
+  start [title]             record from the terminal (Ctrl+C to stop)
         [--language xx]     force a language instead of auto-detect
         [--no-mic]          only what you hear
-  transcribe <folder>       transcribe a recording again
+  transcribe <meeting>      transcribe a meeting again (its id, see ./mel sql)
+  export <meeting>          print a meeting's transcript as Markdown
+  sql [query]               open the database ($DB)
+  import                    move recordings from before the database into it
   server | stop | logs      run, stop or follow the transcription server
   build                     rebuild the recorder and the app
   download [--speakers]     download the models (and check speaker detection)

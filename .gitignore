@@ -1,4 +1,3 @@
-recordings/
 models/
 capture/.build/
 __pycache__/
@@ -6,8 +5,11 @@ server/server.log
 server/server.pid
 app/.build/
 app/build/
-server/config.env
-voices.json
 setup.log
 .DS_Store
 app/Icon/AppIcon.icns
+recordings/
+recordings.imported/
+*.imported
+voices.json
+server/config.env

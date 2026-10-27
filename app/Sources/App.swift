@@ -5,20 +5,17 @@ import AVFoundation
 import SwiftUI
 
 let root = URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "MelRoot") as? String ?? FileManager.default.currentDirectoryPath)
-let recordingsDir = root.appendingPathComponent("recordings")
+/// mel.db and Recordings/: MEL_DATA when set (development), else where ./mel build put them, else the default.
+let dataDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["MEL_DATA"]
+    ?? Bundle.main.object(forInfoDictionaryKey: "MelData") as? String
+    ?? NSHomeDirectory() + "/Library/Application Support/Mel")
+let recordingsDir = dataDir.appendingPathComponent("Recordings")
 let serverLog = root.appendingPathComponent("server/server.log")
-let serverConfig = root.appendingPathComponent("server/config.env") // read by ./mel when it starts the server
-let voicesFile = root.appendingPathComponent("voices.json") // read by the client to recognize named voices
 
-/// A named voiceprint: the average pyannote embedding over the meetings where you named this person.
-struct Voice: Codable {
-    var embedding: [Double]
-    var meetings: Int
-}
-
-func unit(_ v: [Double]) -> [Double] {
-    let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
-    return norm > 0 ? v.map { $0 / norm } : v
+/// Someone you've named, as listed in Settings › Voices.
+struct Voice {
+    let id: Int64
+    let meetings: Int
 }
 
 struct ModelOption: Identifiable {
@@ -39,17 +36,10 @@ let titleModels = [
     ModelOption(id: "mlx-community/Llama-3.2-1B-Instruct-4bit", name: "Llama 3.2 1B · smallest · 0.7 GB"),
 ]
 
-/// KEY=value lines of server/config.env.
-func readServerConfig() -> [String: String] {
-    let text = (try? String(contentsOf: serverConfig, encoding: .utf8)) ?? ""
-    return Dictionary(text.split(separator: "\n").compactMap { line -> (String, String)? in
-        let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
-        return parts.count == 2 && !line.hasPrefix("#") ? (parts[0], parts[1]) : nil
-    }, uniquingKeysWith: { $1 })
+/// Languages the server detects among (settings.languages, set by `./mel setup`).
+var configuredLanguages: [String] {
+    (Database.shared.setting("languages") ?? "en,es").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 }
-
-/// Languages the server detects among, as in server/app.py.
-let configuredLanguages = (readServerConfig()["LANGUAGES"] ?? "en,es").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 
 /// Runs `./mel <args>`, reporting output lines and exit status on the main queue.
 @discardableResult
@@ -108,38 +98,50 @@ func clock(_ seconds: Double) -> String {
     return String(format: "%02d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
 }
 
+/// A row of `meetings`.
 struct Recording: Identifiable, Hashable {
-    let url: URL
+    let meeting: Int64
+    let label: String // the title, empty until named
+    let date: Date?
     let duration: TimeInterval
-    let hasTranscript: Bool
-    var id: String { url.path }
+    let folder: String
+    let status: String
+    let segments: Int
+    var id: String { String(meeting) }
+    var title: String { label.isEmpty ? "Untitled meeting" : label }
+    var hasTranscript: Bool { segments > 0 }
     /// Transcribed, even if nothing was said.
-    var transcribed: Bool { FileManager.default.fileExists(atPath: url.appendingPathComponent("transcript.json").path) }
-    var folder: String { url.lastPathComponent }
+    var transcribed: Bool { status == "done" }
+    var url: URL { recordingsDir.appendingPathComponent(folder) }
     var audio: URL { url.appendingPathComponent("meeting.wav") }
 
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd_HH-mm"
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         return f
     }()
 
-    /// Folders are named `<yyyy-MM-dd_HH-mm>[_label]`.
-    var datePrefix: String { String(folder.prefix(16)) }
-    var date: Date? { Self.stamp.date(from: datePrefix) }
-    var label: String { folder.count > 17 ? String(folder.dropFirst(17)).replacingOccurrences(of: "-", with: " ") : "" }
-    var title: String { label.isEmpty ? "Untitled meeting" : label }
+    init(_ row: Row) {
+        meeting = row["id"] as! Int64
+        label = row["title"] as? String ?? ""
+        date = (row["started_at"] as? String).flatMap(Self.stamp.date(from:))
+        duration = row["duration"] as? Double ?? 0
+        folder = row["folder"] as? String ?? ""
+        status = row["status"] as? String ?? "done"
+        segments = Int(row["segments"] as? Int64 ?? 0)
+    }
 }
 
-/// One transcript line, as stored in transcript.json.
-struct Entry: Codable, Identifiable {
+/// A row of `segments`, with its speaker's name: the linked person's, or the speaker's label.
+struct Entry: Identifiable {
+    var id: Int64
     var start: Double
     var end: Double
     var speaker: String
+    var speakerId: Int64
     var language: String?
     var text: String
-    var id: String { "\(start)|\(speaker)|\(text)" }
 }
 
 enum ServerState: Equatable {
@@ -159,32 +161,35 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     var selectedRecording: Recording? { recordings.first { $0.id == selection } }
     @Published var transcribing: [String: String] = [:] // recording id → progress
-    @Published var revision = 0 // bumped when transcripts change on disk
-    @Published var voices: [String: Voice] = (try? Data(contentsOf: voicesFile)).flatMap { try? JSONDecoder().decode([String: Voice].self, from: $0) } ?? [:]
+    @Published var revision = 0 // bumped when transcripts change in the database
+    @Published var voices: [String: Voice] = [:]
 
-    // Recording
-    @Published var language = UserDefaults.standard.string(forKey: "language") ?? "auto" {
+    // Settings, stored in the database's settings table
+    @Published var language = "auto" {
         didSet {
-            UserDefaults.standard.set(language, forKey: "language")
+            guard loaded else { return }
+            db.setSetting("language", language)
             // Applies to the rest of a meeting in progress, too.
             recorderInput?.fileHandleForWriting.write(Data("language \(language)\n".utf8))
         }
     }
-    @Published var floatingTranscript = UserDefaults.standard.object(forKey: "floatingTranscript") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(floatingTranscript, forKey: "floatingTranscript") }
+    @Published var floatingTranscript = true {
+        didSet { if loaded { db.setSetting("floating_transcript", floatingTranscript ? "1" : "0") } }
     }
-    @Published var mic = UserDefaults.standard.object(forKey: "mic") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(mic, forKey: "mic") }
+    @Published var mic = true {
+        didSet { if loaded { db.setSetting("mic", mic ? "1" : "0") } }
     }
-    @Published var transcriptionModel = UserDefaults.standard.string(forKey: "transcriptionModel") ?? transcriptionModels[0].id {
-        didSet { modelsChanged(key: "transcriptionModel", value: transcriptionModel) }
+    @Published var transcriptionModel = transcriptionModels[0].id {
+        didSet { modelsChanged(key: "model", value: transcriptionModel, old: oldValue) }
     }
-    @Published var titleModel = UserDefaults.standard.string(forKey: "titleModel") ?? titleModels[0].id {
-        didSet { modelsChanged(key: "titleModel", value: titleModel) }
+    @Published var titleModel = titleModels[0].id {
+        didSet { modelsChanged(key: "llm", value: titleModel, old: oldValue) }
     }
+
+    // Recording
     @Published var startedAt: Date?
     @Published var stopping = false
-    @Published var folder: URL?
+    @Published var liveMeeting: Int64?
     @Published var status = ""
     @Published var liveEntries: [Entry] = []
     private var recorder: Process?
@@ -198,17 +203,26 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     private var serverLaunched: Date?
     private var ticks = 0
-    private let utterancePattern = #/^(?:\(\d+/\d+\) )?\[(\d\d):(\d\d):(\d\d)\] (Me|Them) \(\w+\): (.*)$/#
+    private var loaded = false // settings read from the database; their didSet must not write them back yet
+    private var db: Database { .shared } // opened on first use, after ./mel init created it
     private let progressPattern = #/^\((\d+)/(\d+)\)/#
-    private let titledPattern = #/^Titled “(.*)” → (.*)$/# // the client renamed the meeting folder
+    private let titledPattern = #/^Titled “(.*)”$/#
+    private let recordingPattern = #/^● Recording → meeting (\d+)/#
 
     var isRecording: Bool { recorder != nil }
 
     override init() {
+        // ./mel creates the database and applies migrations; wait for it before the first query.
+        mel(["init"]).waitUntilExit()
         super.init()
+        language = db.setting("language") ?? "auto"
+        floatingTranscript = db.setting("floating_transcript") != "0"
+        mic = db.setting("mic") != "0"
+        transcriptionModel = db.setting("model") ?? transcriptionModels[0].id
+        titleModel = db.setting("llm") ?? titleModels[0].id
+        loaded = true
         refresh()
-        for name in voices.keys { recognize(name) }  // apply names given in other meetings to earlier ones
-        writeServerConfig()
+        for voice in voices.values { recognize(voice.id) }  // apply names given in other meetings to earlier ones
         startServer()
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
     }
@@ -217,21 +231,18 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
         now = Date()
         ticks += 1
         if ticks % 2 == 0 { checkServer() }
-        if ticks % 5 == 0 { refresh() }
+        // A recording or re-transcription writes from another process; re-read when it commits.
+        if db.changed() {
+            refresh()
+            if let liveMeeting { liveEntries = entries(for: liveMeeting) }
+        }
     }
 
     // MARK: Server
 
-    /// Updates the model choices and keeps everything else in the file (LANGUAGES, from `./mel setup`).
-    private func writeServerConfig() {
-        var lines = readServerConfig().filter { $0.key != "MODEL" && $0.key != "LLM" }.map { "\($0.key)=\($0.value)" }.sorted()
-        lines += ["MODEL=\(transcriptionModel)", "LLM=\(titleModel)"]
-        try? (lines.joined(separator: "\n") + "\n").write(to: serverConfig, atomically: true, encoding: .utf8)
-    }
-
-    private func modelsChanged(key: String, value: String) {
-        UserDefaults.standard.set(value, forKey: key)
-        writeServerConfig()
+    private func modelsChanged(key: String, value: String, old: String) {
+        guard loaded, value != old else { return }
+        db.setSetting(key, value)
         // A running server keeps its models; restart it unless a recording is using it (then the next start picks them up).
         guard !isRecording, server != .stopped else { return }
         serverLaunched = Date()
@@ -295,7 +306,7 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func startRecording() {
         liveEntries = []
         status = "Starting…"
-        folder = nil
+        liveMeeting = nil
         var args = ["start", "--language", language]
         if !mic { args.append("--no-mic") }
         startedAt = Date()
@@ -310,7 +321,8 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.stopping = false
             if code != 0, code != SIGTERM { self.status = "Recording exited with an error (code \(code)). \(self.status)" }
             self.refresh()
-            if self.selection == Model.live, let folder = self.folder { self.selection = folder.path }
+            if self.selection == Model.live, let meeting = self.liveMeeting { self.selection = String(meeting) }
+            self.liveMeeting = nil
             if self.status.contains("no audio was captured") {
                 self.selection = nil
                 self.showCaptureFailure()
@@ -346,52 +358,42 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     private func handleRecorderLine(_ line: String) {
-        if let m = line.wholeMatch(of: utterancePattern) {
-            let start = Double(Int(m.1)! * 3600 + Int(m.2)! * 60 + Int(m.3)!)
-            liveEntries.append(Entry(start: start, end: start, speaker: String(m.4), text: String(m.5)))
-        } else if let m = line.wholeMatch(of: titledPattern) {
-            folder = URL(fileURLWithPath: String(m.2)).standardizedFileURL
-            status = "Titled “\(m.1)”"
-        } else if line.hasPrefix("Language: ") {
-            return
-        } else if line.hasPrefix("● Recording → ") {
-            folder = URL(fileURLWithPath: String(line.dropFirst("● Recording → ".count))).standardizedFileURL
+        if let m = line.prefixMatch(of: recordingPattern) {
+            liveMeeting = Int64(m.1)
             status = "Listening"
-        } else if !line.trimmingCharacters(in: .whitespaces).isEmpty, !line.contains("Ctrl+C"), !line.hasPrefix("[") {  // [capture] lines are diagnostics
+        } else if let m = line.wholeMatch(of: titledPattern) {
+            status = "Titled “\(m.1)”"
+        } else if line.hasPrefix("Language: ") || line.hasPrefix("[") { // utterances come from the database; [capture] lines are diagnostics
+            return
+        } else if !line.trimmingCharacters(in: .whitespaces).isEmpty, !line.contains("Ctrl+C") {
             status = line.trimmingCharacters(in: .whitespaces)
         }
     }
 
-    // MARK: Recordings
+    // MARK: Meetings
 
     func refresh() {
-        let folders = (try? FileManager.default.contentsOfDirectory(at: recordingsDir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        recordings = folders
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .map(\.standardizedFileURL)
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .map { url in
-                let wav = ["meeting.wav", "mic.wav", "system.wav"].map { url.appendingPathComponent($0) }
-                    .first { FileManager.default.fileExists(atPath: $0.path) }
-                let bytes = wav.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 44
-                let transcript = url.appendingPathComponent("transcript.md")
-                let hasText = (try? String(contentsOf: transcript, encoding: .utf8))?.contains("**") ?? false
-                return Recording(url: url, duration: Double(bytes - 44) / 32_000, hasTranscript: hasText)
-            }
+        recordings = db.query("""
+            SELECT m.*, (SELECT count(*) FROM segments s WHERE s.meeting_id = m.id) AS segments
+            FROM meetings m ORDER BY m.started_at DESC
+            """).map(Recording.init)
+        voices = Dictionary(uniqueKeysWithValues: db.query("SELECT id, name, meetings FROM people").map {
+            ($0["name"] as! String, Voice(id: $0["id"] as! Int64, meetings: Int($0["meetings"] as? Int64 ?? 1)))
+        })
     }
 
-    /// Past recordings grouped by day, newest first. The one being recorded is shown separately.
+    /// Past meetings grouped by day, newest first. The one being recorded is shown separately.
     var days: [(day: Date, recordings: [Recording])] {
-        let visible = recordings.filter { !(isRecording && $0.url == folder) }
+        let visible = recordings.filter { !(isRecording && $0.meeting == liveMeeting) }
         let groups = Dictionary(grouping: visible) { Calendar.current.startOfDay(for: $0.date ?? .distantPast) }
         return groups.sorted { $0.key > $1.key }.map { (day: $0.key, recordings: $0.value) }
     }
 
     /// `language` defaults to the one chosen for new recordings.
     func transcribe(_ recording: Recording, language: String? = nil) {
-        var id = recording.id // changes if the meeting gets titled (its folder is renamed)
+        let id = recording.id
         transcribing[id] = "Starting…"
-        mel(["transcribe", recording.url.path, "--language", language ?? self.language], onLine: { line in
+        mel(["transcribe", id, "--language", language ?? self.language], onLine: { line in
             if let match = line.prefixMatch(of: self.progressPattern) {
                 self.transcribing[id] = "Transcribing \(match.1)/\(match.2)"
             } else if line.hasPrefix("Detecting speakers") {
@@ -400,13 +402,6 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 self.transcribing[id] = "Naming meeting…"
             } else if line.contains("loading model") {
                 self.transcribing[id] = "Loading model…"
-            } else if let m = line.wholeMatch(of: self.titledPattern) {
-                let renamed = URL(fileURLWithPath: String(m.2)).standardizedFileURL.path
-                self.transcribing[id] = nil
-                if self.selection == id { self.selection = renamed }
-                id = renamed
-                self.transcribing[id] = "Finishing…"
-                self.refresh()
             }
         }, onExit: { _ in
             self.transcribing[id] = nil
@@ -415,100 +410,101 @@ final class Model: NSObject, ObservableObject, AVAudioPlayerDelegate {
         })
     }
 
-    func entries(for recording: Recording) -> [Entry] {
-        let data = try? Data(contentsOf: recording.url.appendingPathComponent("transcript.json"))
-        return data.flatMap { try? JSONDecoder().decode([Entry].self, from: $0) } ?? []
+    func entries(for meeting: Int64) -> [Entry] {
+        db.query("""
+            SELECT s.id, s.start, s.end, s.language, s.text, s.speaker_id, COALESCE(p.name, sp.label) AS speaker
+            FROM segments s JOIN speakers sp ON sp.id = s.speaker_id LEFT JOIN people p ON p.id = sp.person_id
+            WHERE s.meeting_id = ? ORDER BY s.start
+            """, meeting).map {
+            Entry(id: $0["id"] as! Int64, start: $0["start"] as? Double ?? 0, end: $0["end"] as? Double ?? 0,
+                  speaker: $0["speaker"] as? String ?? "", speakerId: $0["speaker_id"] as! Int64,
+                  language: $0["language"] as? String, text: $0["text"] as? String ?? "")
+        }
     }
 
-    /// Writes transcript.json and transcript.md in the same format as the Python client.
-    private func save(_ entries: [Entry], in folder: URL) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
-        try? encoder.encode(entries).write(to: folder.appendingPathComponent("transcript.json"))
-        let body = entries.map { "[\(clock($0.start))] **\($0.speaker)**: \($0.text)" }.joined(separator: "\n\n")
-        try? "# \(folder.lastPathComponent)\n\n\(body)\n".write(to: folder.appendingPathComponent("transcript.md"), atomically: true, encoding: .utf8)
-    }
+    func entries(for recording: Recording) -> [Entry] { entries(for: recording.meeting) }
 
+    /// Naming a speaker who has a voiceprint links them to that person (created if new), teaches Mel the
+    /// voice and looks for it in other meetings. "Me" and "Them" have no voiceprint and are just relabeled.
     func renameSpeaker(in recording: Recording, from old: String, to new: String) {
         let new = new.trimmingCharacters(in: .whitespaces)
         guard !new.isEmpty, new != old else { return }
-        var entries = entries(for: recording)
-        for i in entries.indices where entries[i].speaker == old { entries[i].speaker = new }
-        save(entries, in: recording.url)
-        // Remember this voice under the new name so future meetings recognize it.
-        let printsFile = recording.url.appendingPathComponent("speakers.json")
-        if var prints = (try? Data(contentsOf: printsFile)).flatMap({ try? JSONDecoder().decode([String: [Double]].self, from: $0) }),
-           let voiceprint = prints.removeValue(forKey: old) {
-            prints[new] = voiceprint
-            try? JSONEncoder().encode(prints).write(to: printsFile)
-            learnVoice(new, from: voiceprint)
-            recognize(new, except: recording)
+        let speakers = db.query("""
+            SELECT s.id, s.voiceprint FROM speakers s LEFT JOIN people p ON p.id = s.person_id
+            WHERE s.meeting_id = ? AND COALESCE(p.name, s.label) = ?
+            """, recording.meeting, old)
+        var learned: Set<Int64> = []
+        db.transaction {
+            for speaker in speakers {
+                if let voiceprint = speaker["voiceprint"] as? Data {
+                    let person = learnVoice(new, from: voiceprint)
+                    db.execute("UPDATE speakers SET person_id = ? WHERE id = ?", person, speaker["id"])
+                    learned.insert(person)
+                } else {
+                    db.execute("UPDATE OR IGNORE speakers SET label = ?, person_id = NULL WHERE id = ?", new, speaker["id"])
+                }
+            }
         }
+        for person in learned { recognize(person, except: recording.meeting) }
+        refresh()
         revision += 1
     }
 
-    /// Names this voice in earlier meetings too: an unnamed speaker ("Speaker N") whose voiceprint
-    /// matches gets the name, without transcribing again. Same threshold as the client (VOICE_MATCH).
-    private func recognize(_ name: String, except current: Recording? = nil) {
-        guard let voice = voices[name] else { return }
-        for recording in recordings where recording.id != current?.id {
-            let printsFile = recording.url.appendingPathComponent("speakers.json")
-            guard var prints = (try? Data(contentsOf: printsFile)).flatMap({ try? JSONDecoder().decode([String: [Double]].self, from: $0) }),
-                  prints[name] == nil else { continue }
-            let match = prints
-                .filter { $0.key.wholeMatch(of: #/Speaker \d+/#) != nil && $0.value.count == voice.embedding.count }
-                .map { (speaker: $0.key, score: zip(unit($0.value), voice.embedding).reduce(0) { $0 + $1.0 * $1.1 }) }
+    /// Names this person in other meetings too: in each meeting where they aren't yet, the unnamed speaker
+    /// ("Speaker N") whose voiceprint matches best gets linked. Same threshold as the client (VOICE_MATCH).
+    private func recognize(_ person: Int64, except current: Int64? = nil) {
+        guard let blob = db.query("SELECT voiceprint FROM people WHERE id = ?", person).first?["voiceprint"] as? Data else { return }
+        let voice = floats(blob)
+        let candidates = db.query("""
+            SELECT id, meeting_id, voiceprint FROM speakers
+            WHERE person_id IS NULL AND voiceprint IS NOT NULL AND label LIKE 'Speaker %' AND meeting_id != ?
+              AND meeting_id NOT IN (SELECT meeting_id FROM speakers WHERE person_id = ?)
+            """, current ?? -1, person)
+        let best = Dictionary(grouping: candidates) { $0["meeting_id"] as! Int64 }.compactMap { _, speakers in
+            speakers.map { (id: $0["id"] as! Int64, score: zip(floats($0["voiceprint"] as! Data), voice).reduce(Float(0)) { $0 + $1.0 * $1.1 }) }
                 .max { $0.score < $1.score }
-            guard let match, match.score >= 0.75 else { continue }
-            var entries = entries(for: recording)
-            for i in entries.indices where entries[i].speaker == match.speaker { entries[i].speaker = name }
-            save(entries, in: recording.url)
-            prints[name] = prints.removeValue(forKey: match.speaker)
-            try? JSONEncoder().encode(prints).write(to: printsFile)
+        }
+        for match in best where match.score >= 0.75 {
+            db.execute("UPDATE speakers SET person_id = ? WHERE id = ?", person, match.id)
         }
     }
 
-    private func learnVoice(_ name: String, from voiceprint: [Double]) {
-        let sample = unit(voiceprint)
-        if var voice = voices[name], voice.embedding.count == sample.count {
-            let n = Double(voice.meetings)
-            voice.embedding = unit(zip(voice.embedding, sample).map { ($0 * n + $1) / (n + 1) })
-            voice.meetings += 1
-            voices[name] = voice
-        } else {
-            voices[name] = Voice(embedding: sample, meetings: 1)
+    /// Adds a voiceprint to the person's running mean, creating them if needed. Returns their id.
+    private func learnVoice(_ name: String, from voiceprint: Data) -> Int64 {
+        let sample = unit(floats(voiceprint))
+        if let person = db.query("SELECT id, voiceprint, meetings FROM people WHERE name = ?", name).first {
+            let n = Float(person["meetings"] as? Int64 ?? 1)
+            let mean = unit(zip(floats(person["voiceprint"] as! Data), sample).map { ($0 * n + $1) / (n + 1) })
+            db.execute("UPDATE people SET voiceprint = ?, meetings = meetings + 1 WHERE id = ?", blob(mean), person["id"])
+            return person["id"] as! Int64
         }
-        saveVoices()
+        return db.execute("INSERT INTO people (name, voiceprint) VALUES (?, ?)", name, blob(sample))
     }
 
+    /// Mel stops recognizing them; meetings keep showing their name as the speaker's label.
     func forgetVoice(_ name: String) {
-        voices[name] = nil
-        saveVoices()
-    }
-
-    private func saveVoices() {
-        try? JSONEncoder().encode(voices).write(to: voicesFile)
+        guard let voice = voices[name] else { return }
+        db.transaction {
+            db.execute("UPDATE OR IGNORE speakers SET label = ? WHERE person_id = ? AND label LIKE 'Speaker %'", name, voice.id)
+            db.execute("DELETE FROM people WHERE id = ?", voice.id)
+        }
+        refresh()
+        revision += 1
     }
 
     func trash(_ recording: Recording) {
         if playing?.deletingLastPathComponent() == recording.url { stopPlayback() }
         try? FileManager.default.trashItem(at: recording.url, resultingItemURL: nil)
+        db.execute("DELETE FROM meetings WHERE id = ?", recording.meeting)
         if selection == recording.id { selection = nil }
         refresh()
     }
 
     func rename(_ recording: Recording, to title: String) {
-        let slug = title.trimmingCharacters(in: .whitespaces).replacing(#/[\s/:]+/#, with: "-")
-        let name = slug.isEmpty ? recording.datePrefix : "\(recording.datePrefix)_\(slug)"
-        let destination = recordingsDir.appendingPathComponent(name).standardizedFileURL
-        guard name != recording.folder, !FileManager.default.fileExists(atPath: destination.path) else { return }
-        guard (try? FileManager.default.moveItem(at: recording.url, to: destination)) != nil else { return }
-        if recording.hasTranscript { // the transcript heading carries the folder name
-            save(entries(for: Recording(url: destination, duration: 0, hasTranscript: true)), in: destination)
-        }
-        if playing?.deletingLastPathComponent() == recording.url { stopPlayback() }
+        let title = title.trimmingCharacters(in: .whitespaces)
+        guard title != recording.label else { return }
+        db.execute("UPDATE meetings SET title = ? WHERE id = ?", title.isEmpty ? nil : title, recording.meeting)
         refresh()
-        selection = destination.path
     }
 
     // MARK: Playback
